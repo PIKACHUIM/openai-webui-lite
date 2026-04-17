@@ -944,6 +944,7 @@ function getLiteModelId(modelIds) {
     .map(i => i.split('=')[0].trim())
     .filter(i => i);
   const parts = [
+    'nemotron',
     'deepseek-v',
     'qwen3-next',
     '-oss-',
