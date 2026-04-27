@@ -2710,11 +2710,13 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
       /* TTS 滑块底轨颜色（覆盖系统深色模式下的 #3b3b3b） */
       #ttsSpeedSlider::-webkit-slider-runnable-track,
       #ttsPitchSlider::-webkit-slider-runnable-track {
-        background: #e0e0e0;
+        background: #eaeaea;
+        border-radius: 8px;
       }
       #ttsSpeedSlider::-moz-range-track,
       #ttsPitchSlider::-moz-range-track {
-        background: #e0e0e0;
+        background: #eaeaea;
+        border-radius: 8px;
       }
       
 </style>
