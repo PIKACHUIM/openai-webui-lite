@@ -955,10 +955,6 @@ textarea::placeholder {
   list-style-type: disc !important;
 }
 
-.session-content.capturing .content-tts-footer {
-  display: none !important;
-}
-
 .content-section {
   flex: 0 0 auto;
   position: relative;

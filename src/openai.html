@@ -964,7 +964,7 @@
                   ></div>
                   <!-- TTS 朗读 footer -->
                   <div
-                    v-if="ttsSupported && msg.content"
+                    v-if="ttsSupported && !isCapturing && msg.content"
                     class="content-tts-footer"
                     style="
                       display: flex;
