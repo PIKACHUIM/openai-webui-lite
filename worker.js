@@ -2483,10 +2483,6 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
         list-style-type: disc !important;
       }
       
-      .session-content.capturing .content-tts-footer {
-        display: none !important;
-      }
-      
       .content-section {
         flex: 0 0 auto;
         position: relative;
@@ -3647,6 +3643,7 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
                   <!-- TTS 朗读 footer -->
                   <div
                     v-if="ttsSupported && msg.content"
+                    v-show="!isCapturing"
                     class="content-tts-footer"
                     style="
                       display: flex;
