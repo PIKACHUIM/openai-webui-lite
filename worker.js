@@ -6352,7 +6352,7 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
                   Authorization: 'Bearer ' + this.apiKey
                 },
                 body: JSON.stringify({
-                  input: msg.content,
+                  input: input,
                   voice: this.ttsVoice,
                   speed: this.ttsSpeed,
                   pitch: this.ttsPitch
