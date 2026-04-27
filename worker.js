@@ -2484,7 +2484,7 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
       }
       
       .session-content.capturing .content-tts-footer {
-        display: none;
+        display: none !important;
       }
       
       .content-section {

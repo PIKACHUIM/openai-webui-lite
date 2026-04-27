@@ -956,7 +956,7 @@ textarea::placeholder {
 }
 
 .session-content.capturing .content-tts-footer {
-  display: none;
+  display: none !important;
 }
 
 .content-section {
