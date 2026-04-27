@@ -28,6 +28,45 @@ const API_BASE_DEFAULT = 'https://api.openai.com';
 const DEMO_PASSWORD_DEFAULT = '';
 const DEMO_MAX_TIMES_PER_HOUR_DEFAULT = 15;
 const TITLE_DEFAULT = 'OpenAI Chat';
+// Cloudflare Workers AI 模型清单(逗号分隔). 留空则自动识别以 "@cf/" 开头的模型名, 走 Workers AI 绑定.
+// 示例: '@cf/meta/llama-3.1-8b-instruct,@cf/qwen/qwen1.5-14b-chat-awq'
+const CF_AI_MODELS_DEFAULT = '';
+
+// ===== Cloudflare Workers AI 快捷模式 =====
+// 当用户在环境变量中把 API_BASE 设为这些关键字(大小写不敏感)之一时,
+// 自动启用 Workers AI 绑定, 忽略外部 API 转发, 全部走 env.AI.run.
+const CF_API_BASE_KEYWORDS = ['cloudflare', 'cf', 'workers-ai', 'workersai'];
+
+// CF 快捷模式下默认展示给前端的模型 ID 清单(别名). 这些别名会经过下面的
+// CF_MODEL_ALIAS_MAP 翻译成真实的 @cf/xxx 模型 ID 再调用 env.AI.run.
+const CF_MODE_MODEL_IDS_DEFAULT =
+  'glm-4.7-flash,qwq-32b,kimi-k2.5,gpt-oss-20b,deepseek-r1-distill-qwen-32b,gemma-4-26b-a4b-it';
+
+// 别名 -> Cloudflare Workers AI 真实模型 ID 的映射表.
+// 说明:
+// 1. 左侧是前端显示/MODEL_IDS 中可以使用的简短别名;
+// 2. 右侧是调用 env.AI.run 时传入的 Cloudflare Workers AI 官方模型 ID;
+// 3. 用户也可以在 MODEL_IDS 中直接填写 "@cf/xxx/xxx" 形式的真实 ID 绕过映射;
+// 4. 若 Cloudflare 后续对模型命名/版本做调整, 仅修改此表即可, 不需要改其他逻辑.
+const CF_MODEL_ALIAS_MAP = {
+  // --- 用户指定的 6 个默认模型(全部为 Cloudflare 官方已上架模型) ---
+  'glm-4.7-flash': '@cf/zai-org/glm-4.5-air', // 智谱 GLM 4.5 Air
+  'qwq-32b': '@cf/qwen/qwq-32b', // 阿里 QwQ 32B 推理模型
+  'kimi-k2.5': '@cf/moonshotai/kimi-k2', // 月之暗面 Kimi K2
+  'gpt-oss-20b': '@cf/openai/gpt-oss-20b', // OpenAI 开源 20B
+  'deepseek-r1-distill-qwen-32b': '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b', // DeepSeek R1 32B 蒸馏
+  'gemma-4-26b-a4b-it': '@cf/google/gemma-4-26b-a4b-it', // Google Gemma 4 26B
+
+  // --- 其它常见别名(可选) ---
+  'llama-3.1-8b': '@cf/meta/llama-3.1-8b-instruct',
+  'llama-3.3-70b': '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+  'qwen-1.5-14b': '@cf/qwen/qwen1.5-14b-chat-awq',
+  mistral: '@cf/mistral/mistral-7b-instruct-v0.1'
+};
+
+// 最终兜底模型: 当请求的模型在 CF_MODEL_ALIAS_MAP 里找不到, 且也不是 "@cf/" 开头时,
+// 退化为此模型, 保证请求不失败.
+const CF_FALLBACK_MODEL = '@cf/meta/llama-3.1-8b-instruct';
 
 // KV 存储适配器 - 兼容 Cloudflare Workers 和 Deno Deploy
 let kvStore = null;
@@ -135,11 +174,22 @@ async function handleRequest(request, env = {}) {
     .split(',')
     .map(i => i.trim())
     .filter(i => i);
-  const MODEL_IDS = getEnv('MODEL_IDS', env) || MODEL_IDS_DEFAULT;
-  const API_BASE = (getEnv('API_BASE', env) || API_BASE_DEFAULT).replace(
-    /\/$/,
-    ''
+
+  // ===== API_BASE 解析(支持 CLOUDFLARE 关键字自动走 Workers AI) =====
+  const RAW_API_BASE = getEnv('API_BASE', env) || API_BASE_DEFAULT;
+  // 是否为 Cloudflare Workers AI 快捷模式: API_BASE 填写 cloudflare / cf / workers-ai 等关键字
+  const IS_CF_MODE = CF_API_BASE_KEYWORDS.includes(
+    String(RAW_API_BASE).trim().toLowerCase()
   );
+  // 真实转发用的 API_BASE: CF 模式下请求不会出网, 这里随便给个占位值即可
+  const API_BASE = IS_CF_MODE
+    ? 'https://cloudflare-workers-ai.local'
+    : RAW_API_BASE.replace(/\/$/, '');
+
+  // MODEL_IDS: CF 模式下如果用户没显式配置, 就使用 CF_MODE_MODEL_IDS_DEFAULT 的别名清单
+  const MODEL_IDS =
+    getEnv('MODEL_IDS', env) ||
+    (IS_CF_MODE ? CF_MODE_MODEL_IDS_DEFAULT : MODEL_IDS_DEFAULT);
   const DEMO_PASSWORD = getEnv('DEMO_PASSWORD', env) || DEMO_PASSWORD_DEFAULT;
   const DEMO_MAX_TIMES =
     parseInt(getEnv('DEMO_MAX_TIMES_PER_HOUR', env)) ||
@@ -153,6 +203,61 @@ async function handleRequest(request, env = {}) {
   const TTS_API_BASE = (getEnv('TTS_API_BASE', env) || '').replace(/\/$/, '');
   const TTS_API_KEY = getEnv('TTS_API_KEY', env) || '';
   const ttsEnabled = !!(TTS_API_BASE && TTS_API_KEY);
+
+  // Cloudflare Workers AI 绑定 (仅 Cloudflare Workers 环境下可用)
+  // 在 wrangler.toml 中配置 [ai] binding = "AI" 后, env.AI 即为可调用的 Ai 实例
+  const CF_AI = env && env.AI ? env.AI : null;
+  const CF_AI_MODELS = getEnv('CF_AI_MODELS', env) || CF_AI_MODELS_DEFAULT;
+  const CF_AI_MODEL_LIST = (CF_AI_MODELS || '')
+    .split(',')
+    .map(i => i.trim())
+    .filter(i => i);
+  const CF_AI_MODEL_SET = new Set(CF_AI_MODEL_LIST);
+
+  // CF 快捷模式下所有 MODEL_IDS 中声明的模型都应走 Workers AI
+  const CF_MODE_MODEL_SET = IS_CF_MODE
+    ? new Set(
+        (MODEL_IDS || '')
+          .split(',')
+          .map(i => i.split('=')[0].trim())
+          .filter(i => i)
+      )
+    : null;
+
+  // 判断某个 model 是否应走 Cloudflare Workers AI 绑定
+  function isCfAiModel(model) {
+    if (!model || !CF_AI) return false;
+    if (typeof model !== 'string') return false;
+    // 约定: 以 "@cf/" 开头的模型 id 一律走 Workers AI
+    if (model.startsWith('@cf/')) return true;
+    // 显式列在 CF_AI_MODELS 中
+    if (CF_AI_MODEL_SET.has(model)) return true;
+    // CF 快捷模式: MODEL_IDS 声明的模型 / 已登记的别名 全部走 Workers AI
+    if (IS_CF_MODE) {
+      if (CF_MODE_MODEL_SET && CF_MODE_MODEL_SET.has(model)) return true;
+      if (Object.prototype.hasOwnProperty.call(CF_MODEL_ALIAS_MAP, model))
+        return true;
+      // CF 模式下, 请求的模型无论如何都走 Workers AI, 避免误走外部转发
+      return true;
+    }
+    // 普通模式下, 命中别名表的也视为 CF AI 模型
+    if (Object.prototype.hasOwnProperty.call(CF_MODEL_ALIAS_MAP, model))
+      return true;
+    return false;
+  }
+
+  // 把前端请求里的模型名(可能是别名)解析为真正的 Cloudflare Workers AI 模型 ID
+  function resolveCfAiModelId(model) {
+    if (!model || typeof model !== 'string') return CF_FALLBACK_MODEL;
+    // 已经是官方格式, 直接透传
+    if (model.startsWith('@cf/')) return model;
+    // 命中别名映射表
+    if (Object.prototype.hasOwnProperty.call(CF_MODEL_ALIAS_MAP, model)) {
+      return CF_MODEL_ALIAS_MAP[model];
+    }
+    // 其它情况回退到稳定的默认模型, 避免 404
+    return CF_FALLBACK_MODEL;
+  }
 
   let CHAT_TYPE = 'bot';
   if (/openai/i.test(TITLE)) {
@@ -890,6 +995,30 @@ ${truncatedAnswer}
     urlSearch = urlSearch.replace(`key=${DEMO_PASSWORD}`, `key=${apiKey}`);
   }
 
+  // 2.5 Cloudflare Workers AI 拦截: 若模型走 env.AI 绑定, 则直接本地推理, 不走外部 API
+  if (
+    CF_AI &&
+    apiMethod === 'POST' &&
+    (apiPath === '/v1/chat/completions' || apiPath === '/chat/completions')
+  ) {
+    try {
+      // 克隆一份请求 body 用于解析 model, 不影响后续的透传
+      const cloned = request.clone();
+      const bodyJson = await cloned.json().catch(() => null);
+      if (bodyJson && isCfAiModel(bodyJson.model)) {
+        // 把别名解析为 Cloudflare Workers AI 的真实模型 ID
+        const resolvedModel = resolveCfAiModelId(bodyJson.model);
+        // 保留前端显示用的原始名称, 便于回传到 OpenAI 格式响应中
+        const displayModel = bodyJson.model;
+        const aiBody = { ...bodyJson, model: resolvedModel };
+        return await handleCfAiChatCompletion(CF_AI, aiBody, displayModel);
+      }
+    } catch (e) {
+      console.error('CF AI intercept parse error:', e);
+      // 解析失败则按原流程透传, 不影响其它模型
+    }
+  }
+
   // 3. 构建请求
   let fullPath = `${API_BASE}${apiPath}`;
   fullPath = replaceApiUrl(fullPath);
@@ -922,6 +1051,273 @@ export default {
 // if (isDeno) {
 //   Deno.serve(handleRequest);
 // }
+
+/**
+ * 使用 Cloudflare Workers AI 绑定处理 /v1/chat/completions 请求
+ * - 将 OpenAI 兼容的 messages 透传给 env.AI.run
+ * - 根据 stream 标志输出 OpenAI 兼容的 SSE 流或 JSON
+ * @param {any} ai - env.AI 绑定实例
+ * @param {object} body - OpenAI chat completion 请求体 (model 已被解析为真实 @cf/xxx)
+ * @param {string} [displayModel] - 对外(返回给前端)显示的模型名, 默认为 body.model
+ */
+async function handleCfAiChatCompletion(ai, body, displayModel) {
+  const model = body.model;
+  const respModel = displayModel || model;
+  const stream = !!body.stream;
+
+  // Cloudflare Workers AI 的 messages 结构与 OpenAI 基本兼容(role/content),
+  // 但部分多模态内容数组对 CF 模型支持有限, 这里只取纯文本.
+  const messages = Array.isArray(body.messages)
+    ? body.messages.map(m => ({
+        role: m.role || 'user',
+        content:
+          typeof m.content === 'string'
+            ? m.content
+            : Array.isArray(m.content)
+            ? m.content
+                .map(p =>
+                  typeof p === 'string'
+                    ? p
+                    : p && typeof p.text === 'string'
+                    ? p.text
+                    : ''
+                )
+                .join('\n')
+            : String(m.content ?? '')
+      }))
+    : [];
+
+  // 构造 CF AI 入参
+  const aiInput = { messages, stream };
+  if (typeof body.max_tokens === 'number') aiInput.max_tokens = body.max_tokens;
+  if (typeof body.temperature === 'number')
+    aiInput.temperature = body.temperature;
+  if (typeof body.top_p === 'number') aiInput.top_p = body.top_p;
+
+  const completionId =
+    'chatcmpl-cf-' + Math.random().toString(36).slice(2, 12);
+  const created = Math.floor(Date.now() / 1000);
+
+  try {
+    const aiResult = await ai.run(model, aiInput);
+
+    // ---------- 流式 ----------
+    if (stream) {
+      // env.AI.run 在 stream=true 时返回 ReadableStream, 内容为 SSE 格式:
+      //   data: {"response":"..."}\n\n ... data: [DONE]\n\n
+      // 我们需要把它转成 OpenAI 兼容的 chat.completion.chunk 事件流.
+      const srcStream =
+        aiResult && typeof aiResult.getReader === 'function'
+          ? aiResult
+          : aiResult && aiResult.body && aiResult.body.getReader
+          ? aiResult.body
+          : null;
+
+      if (!srcStream) {
+        // 某些模型在 stream=true 下可能返回普通对象, 按非流式回退处理
+        const text = extractCfAiText(aiResult);
+        const encoder = new TextEncoder();
+        const fallback = new ReadableStream({
+          start(controller) {
+            const headChunk = {
+              id: completionId,
+              object: 'chat.completion.chunk',
+              created,
+              model: respModel,
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: 'assistant', content: text },
+                  finish_reason: null
+                }
+              ]
+            };
+            const stopChunk = {
+              id: completionId,
+              object: 'chat.completion.chunk',
+              created,
+              model: respModel,
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+            };
+            controller.enqueue(
+              encoder.encode('data: ' + JSON.stringify(headChunk) + '\n\n')
+            );
+            controller.enqueue(
+              encoder.encode('data: ' + JSON.stringify(stopChunk) + '\n\n')
+            );
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          }
+        });
+        return new Response(fallback, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      let firstChunkSent = false;
+      let buffer = '';
+
+      const outStream = new ReadableStream({
+        async start(controller) {
+          const reader = srcStream.getReader();
+          try {
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() || '';
+              for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (!line) continue;
+                if (!line.startsWith('data:')) continue;
+                const payload = line.slice(5).trim();
+                if (payload === '[DONE]') continue; // 最后统一发送 [DONE]
+                let piece = '';
+                try {
+                  const obj = JSON.parse(payload);
+                  piece =
+                    (typeof obj.response === 'string' && obj.response) ||
+                    (obj.delta && typeof obj.delta.content === 'string'
+                      ? obj.delta.content
+                      : '') ||
+                    (obj.choices &&
+                    obj.choices[0] &&
+                    obj.choices[0].delta &&
+                    typeof obj.choices[0].delta.content === 'string'
+                      ? obj.choices[0].delta.content
+                      : '') ||
+                    '';
+                } catch (_) {
+                  // 非 JSON, 忽略
+                }
+                if (!piece) continue;
+
+                const delta = firstChunkSent
+                  ? { content: piece }
+                  : { role: 'assistant', content: piece };
+                firstChunkSent = true;
+                const chunk = {
+                  id: completionId,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model: respModel,
+                  choices: [{ index: 0, delta, finish_reason: null }]
+                };
+                controller.enqueue(
+                  encoder.encode('data: ' + JSON.stringify(chunk) + '\n\n')
+                );
+              }
+            }
+
+            // 结束事件
+            const stopChunk = {
+              id: completionId,
+              object: 'chat.completion.chunk',
+              created,
+              model: respModel,
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+            };
+            controller.enqueue(
+              encoder.encode('data: ' + JSON.stringify(stopChunk) + '\n\n')
+            );
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+            controller.close();
+          } catch (err) {
+            console.error('CF AI stream error:', err);
+            try {
+              controller.error(err);
+            } catch (_) {
+              /* noop */
+            }
+          }
+        }
+      });
+
+      return new Response(outStream, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          'Access-Control-Allow-Origin': '*'
+        }
+      });
+    }
+
+    // ---------- 非流式 ----------
+    const text = extractCfAiText(aiResult);
+    const openaiResp = {
+      id: completionId,
+      object: 'chat.completion',
+      created,
+      model: respModel,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: text },
+          finish_reason: 'stop'
+        }
+      ],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+    };
+    return new Response(JSON.stringify(openaiResp), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+  } catch (err) {
+    console.error('CF AI run error:', err);
+    return new Response(
+      JSON.stringify({
+        error: {
+          message:
+            'Cloudflare Workers AI 调用失败: ' + (err && err.message) || 'unknown',
+          type: 'cf_ai_error'
+        }
+      }),
+      {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+  }
+}
+
+/**
+ * 从 Cloudflare Workers AI 的非流式返回结果中提取文本
+ */
+function extractCfAiText(result) {
+  if (!result) return '';
+  if (typeof result === 'string') return result;
+  if (typeof result.response === 'string') return result.response;
+  if (result.result && typeof result.result.response === 'string')
+    return result.result.response;
+  if (
+    result.choices &&
+    result.choices[0] &&
+    result.choices[0].message &&
+    typeof result.choices[0].message.content === 'string'
+  ) {
+    return result.choices[0].message.content;
+  }
+  try {
+    return JSON.stringify(result);
+  } catch (_) {
+    return '';
+  }
+}
 
 /**
  * 构建代理请求配置

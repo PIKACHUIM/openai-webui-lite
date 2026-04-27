@@ -83,6 +83,94 @@
 
 ---
 
+## ☁️ Cloudflare Workers AI 绑定（免费模型，推荐）
+
+本项目已原生支持 **Cloudflare Workers AI 绑定**，允许你**不填任何外部 API Key**，直接调用 Cloudflare 提供的 Llama、Qwen、DeepSeek、Mistral 等开源模型，享受 Cloudflare 每日免费额度。
+
+### 🚀 最简单用法：`API_BASE=CLOUDFLARE` 快捷模式（推荐）
+
+只需在环境变量中设置 **一个** 变量：
+
+```
+API_BASE = CLOUDFLARE
+```
+
+即可自动启用 Workers AI 绑定，并开启以下默认能力：
+
+- 自动将所有前端请求路由到 `env.AI.run()`，**不再向外部发送任何 API 请求**。
+- `MODEL_IDS` 如未配置，默认下拉框提供以下六个免费模型（别名）：
+  ```
+  glm-4.7-flash, qwq-32b, kimi-k2.5, gpt-oss-20b, deepseek-r1-distill-qwen-32b, gemma-4-26b-a4b-it
+  ```
+- 别名会被项目内置的映射表翻译为 Cloudflare Workers AI 目录中**真实已上架**的 `@cf/xxx` 模型 ID（对于官方暂未上架的型号，会落到能力/定位相近的底模上）。
+- 前端下拉框显示的仍是友好的别名；回包中 `model` 字段同样是别名，不暴露底层真实 ID。
+
+> 需要自定义模型清单？只需额外配置 `MODEL_IDS`，支持别名、原始 `@cf/xxx` ID 和 `ID=显示名` 语法混写，例如：
+> ```
+> MODEL_IDS = qwq-32b=QwQ 推理, @cf/meta/llama-3.3-70b-instruct-fp8-fast=Llama 3.3 70B
+> ```
+
+### 工作原理
+- 当 `API_BASE` 填入 **`CLOUDFLARE`/`cf`/`workers-ai`**（大小写不敏感）之一时，进入快捷模式：所有 `MODEL_IDS` 中的模型都走 `env.AI.run()`。
+- 当 `API_BASE` 填入其它地址（如 `https://api.openai.com`）时，仅请求的 `model` 以 `@cf/` 开头（或出现在 `CF_AI_MODELS` 中）时才走 Workers AI，其余模型继续走原有 `API_BASE` + `API_KEYS` 转发逻辑，**两种模式可以同时共存**。
+- 响应会被自动转换为 OpenAI `chat/completions` 兼容格式，同时支持**流式（SSE）**与非流式，前端无需任何改动。
+
+### 配置步骤（Cloudflare Workers 部署）
+
+1. **启用 AI 绑定**：确保项目根目录下的 [`wrangler.toml`](wrangler.toml) 已包含以下配置（本仓库默认已配置）：
+   ```toml
+   [ai]
+   binding = "AI"
+   ```
+   - 若在 Cloudflare Dashboard 手动创建的 Worker，可在 **Settings → Bindings → Add → Workers AI**，绑定变量名填 `AI`。
+
+2. **三选一**的模型列表配置方式：
+   - **方式 A（最推荐）**：只设 `API_BASE=CLOUDFLARE`，用内置默认的 6 个免费模型别名。
+   - **方式 B**：设 `API_BASE=CLOUDFLARE` 同时自定义 `MODEL_IDS`（内容全部走 Workers AI）。
+   - **方式 C**：保持 `API_BASE` 为你的正常外部接口，在 `MODEL_IDS` 中混入 `@cf/` 开头的模型，实现外部模型 + Workers AI 混用：
+     ```
+     MODEL_IDS = @cf/meta/llama-3.1-8b-instruct=Llama 3.1 8B,@cf/qwen/qwen1.5-14b-chat-awq=Qwen1.5 14B,gpt-4o=GPT-4o
+     ```
+
+3. **（可选）显式声明 CF 模型白名单**：如果你的模型 ID 不以 `@cf/` 开头（少见），可通过环境变量显式指定哪些模型走 Workers AI 绑定：
+   ```
+   CF_AI_MODELS = @cf/meta/llama-3.1-8b-instruct,@cf/qwen/qwen1.5-14b-chat-awq
+   ```
+
+4. **鉴权说明**：Workers AI 模型**无需外部 API Key**，但仍需通过 `SECRET_PASSWORD` / `DEMO_PASSWORD` 鉴权（防止被刷）。如果你没设置任何密码，用户在前端输入任意长度 ≥ 10 的字符串即可通过校验。
+
+### 默认别名 ↔ CF 真实模型映射表
+
+| 前端别名（`MODEL_IDS`） | 实际调用的 `@cf/xxx` | 说明 |
+| :--- | :--- | :--- |
+| `glm-4.7-flash` | `@cf/zai-org/glm-4.5-air` | 智谱 GLM 4.5 Air |
+| `qwq-32b` | `@cf/qwen/qwq-32b` | 阿里 QwQ 32B 推理模型 |
+| `kimi-k2.5` | `@cf/moonshotai/kimi-k2` | 月之暗面 Kimi K2 |
+| `gpt-oss-20b` | `@cf/openai/gpt-oss-20b` | OpenAI 开源 20B |
+| `deepseek-r1-distill-qwen-32b` | `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | DeepSeek R1 32B 蒸馏 |
+| `gemma-4-26b-a4b-it` | `@cf/google/gemma-3-12b-it` | 当前 CF 目录 Gemma 最高为 3-12B，后续上架 Gemma-4 可自行更新 |
+
+> Cloudflare 模型目录在不断更新，若命名或版本有变动，只需在 [`worker.js`](worker.js) 的 `CF_MODEL_ALIAS_MAP` 中调整映射即可，无需改动其它逻辑。
+
+### 其他推荐的 CF 模型（直接写 `@cf/xxx`）
+
+| 模型 ID | 说明 |
+| :--- | :--- |
+| `@cf/meta/llama-3.1-8b-instruct` | Meta Llama 3.1 8B，综合能力均衡 |
+| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | Llama 3.3 70B FP8 加速版 |
+| `@cf/qwen/qwen1.5-14b-chat-awq` | 通义千问 1.5 14B，中文表现好 |
+| `@cf/mistral/mistral-7b-instruct-v0.1` | Mistral 7B，英文轻量 |
+| `@cf/google/gemma-7b-it` | Google Gemma 7B |
+
+> 完整模型列表及每日免费额度请参考：[Cloudflare Workers AI 文档](https://developers.cloudflare.com/workers-ai/models/)
+
+### ⚠️ 注意事项
+- Workers AI 绑定**仅在 Cloudflare Workers 平台可用**，Deno Deploy 不支持（在 Deno 环境下，这些模型会回退到外部 API，若未配置会报错）。
+- 免费额度有限（每天 10,000 neurons，详见 CF 文档），超出后会返回 429 错误。
+- 部分 CF 模型对多模态（图片）输入支持有限，当前实现仅提取纯文本内容传递给 Workers AI。
+
+---
+
 ## ⚙️ 配置说明 (环境变量)
 
 本项目主要通过环境变量进行配置，优先级高于代码中的默认值。
@@ -92,13 +180,14 @@
 | `SECRET_PASSWORD` | 否 | **共享密码**。设置后，用户需输入此密码才能使用您配置的 API Key。适合家人朋友共享。 | `my-secret-pwd` |
 | `API_KEYS` | 否 | **API Key 池**。多个 Key 用英文逗号 `,` 分隔，系统会自动轮询使用，实现简单的负载均衡。 | `sk-key1,sk-key2` |
 | `MODEL_IDS` | **是** | **模型列表**。定义前端下拉框显示的模型。支持 `ID=显示名称` 格式。 | `gpt-4o,gemini-2.5-pro` |
-| `API_BASE` | 否 | **接口地址**。默认为 `https://api.openai.com`。如使用中转服务需修改此项。 | `https://api.openai.com` |
+| `API_BASE` | 否 | **接口地址**。默认为 `https://api.openai.com`。填写 `CLOUDFLARE`/`cf`/`workers-ai` 关键字时自动启用 Cloudflare Workers AI 绑定（无需外部 API Key）。 | `CLOUDFLARE` / `https://api.openai.com` |
 | `TAVILY_KEYS` | 否 | **联网搜索 Key**。配置后前端会出现“联网搜索”选项。获取地址：[tavily.com](https://tavily.com/) | `tvly-xxxx` |
 | `TITLE` | 否 | **网站标题**。自定义浏览器标签页标题。 | `我的 AI 助手` |
 | `DEMO_PASSWORD` | 否 | **演示密码**。用于公开演示，有频率限制。 | `demo123` |
 | `DEMO_MAX_TIMES_PER_HOUR` | 否 | 演示密码每小时最大调用次数，默认 15。 | `20` |
 | `TTS_API_BASE` | 否 | **TTS 服务地址**。兼容 OpenAI `/v1/audio/speech` 接口的服务地址，配置后前端显示语音朗读按钮。 | `https://tts.example.com` |
 | `TTS_API_KEY` | 否 | **TTS 服务 API Key**。若 TTS 服务需要独立鉴权，在此填写；留空则复用用户自身的 API Key。 | `sk-tts-xxx` |
+| `CF_AI_MODELS` | 否 | **Cloudflare Workers AI 模型清单**（仅 Cloudflare Workers 部署可用）。多个用英文逗号分隔；留空时自动把所有以 `@cf/` 开头的模型路由到 Workers AI 绑定。 | `@cf/meta/llama-3.1-8b-instruct,@cf/qwen/qwen1.5-14b-chat-awq` |
 
 ### 🔌 常见服务商配置参考
 
@@ -109,6 +198,7 @@
 | **心流 AI** | `https://apis.iflow.cn` | `sk-xxx` | `qwen3-max,deepseek-v3` | 国产模型聚合，Cloudflare 部署即可 |
 | **OpenRouter** | `https://openrouter.ai/api` | `sk-or-xxx` | `anthropic/claude-sonnet-4.5` | 聚合平台 |
 | **DeepSeek** | `https://api.deepseek.com` | `sk-xxx` | `deepseek-chat,deepseek-coder` | 国产之光 |
+| **Cloudflare Workers AI** | `CLOUDFLARE` | 无需配置 | 留空即可（默认启用 6 个免费模型别名） | 免费额度，需在 `wrangler.toml` 配置 `[ai] binding = "AI"`，见上方专章 |
 
 > **💡 资源推荐**：如果您需要免费且稳定的国产大模型 API（如 Qwen, DeepSeek），推荐尝试 [心流 AI](https://iflow.cn/?invite_code=vNEjKzbSTbhgWooCw15Bsw%3D%3D&open=setting)，官方宣称 API 永久免费（但 API Key 有效期为7天，过期后需手动重置新 Key），支持 Cloudflare Workers 稳定调用。
 
@@ -237,6 +327,19 @@ A: 通过环境变量 `TITLE` 设置自定义标题，如 `TITLE=My AI Assistant
 
 **Q: TITLE 环境变量是如何影响 Favicon 的？**  
 A: `TITLE` 中包含 Gemini、OpenAI、Claude、Qwen、DeepSeek、Router 字样时（忽略大小写），网站 Favicon 会自动变为相应的厂商 Logo，否则 Logo 默认为 ChatBot 的样式。
+
+**Q: Cloudflare Workers AI 绑定怎么用？需要 API Key 吗？**  
+A: 无需任何外部 API Key。最简单的方式是在环境变量中设置 `API_BASE=CLOUDFLARE`，项目会自动启用 Workers AI 绑定，并默认提供 6 个免费模型（`glm-4.7-flash, qwq-32b, kimi-k2.5, gpt-oss-20b, deepseek-r1-distill-qwen-32b, gemma-4-26b-a4b-it`）。你也可以保留正常的 `API_BASE`，然后在 `MODEL_IDS` 中添加 `@cf/` 开头的模型 ID，两种模式可以同时存在。
+A: 无需任何外部 API Key。在 `wrangler.toml` 中保留 `[ai] binding = "AI"` 配置，然后在 `MODEL_IDS` 中加入 `@cf/` 开头的模型 ID（如 `@cf/meta/llama-3.1-8b-instruct`），Worker 会自动走 `env.AI.run()` 调用 Cloudflare 的免费模型。前端无需任何改动，响应会被自动转成 OpenAI 兼容的流式/非流式格式。详见上文「☁️ Cloudflare Workers AI 绑定」章节。
+
+**Q: Workers AI 模式下还需要设置 `SECRET_PASSWORD` 吗？**  
+A: 强烈建议设置。Workers AI 虽然不需要外部 API Key，但鉴权仍由 `SECRET_PASSWORD` / `DEMO_PASSWORD` 把关，防止你的 Worker 被陌生人刷爆每日免费额度。如果不设置任何密码，前端用户需要自行在登录框填入任意长度 ≥ 10 的字符串才能通过校验。
+
+**Q: Deno Deploy 也能用 Cloudflare Workers AI 吗？**  
+A: 不能。`env.AI` 绑定是 Cloudflare Workers 平台独有能力，Deno Deploy 环境下该功能会自动失效（模型请求将按常规 OpenAI 兼容接口转发，需要配合 `API_BASE`/`API_KEYS` 使用）。
+
+**Q: 如何同时使用 Workers AI 和 OpenAI/Gemini 等外部模型？**  
+A: 两者可以共存。只需在 `MODEL_IDS` 中混合填入即可，例如：`MODEL_IDS=@cf/meta/llama-3.1-8b-instruct=Llama 3.1,gpt-4o=GPT-4o,gemini-2.5-pro=Gemini 2.5`。Worker 会自动根据模型 ID 路由：`@cf/` 前缀走 Workers AI，其余走 `API_BASE` 配置的外部接口。
 
 ## 📄 许可证
 
