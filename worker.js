@@ -402,7 +402,8 @@ async function handleRequest(request, env = {}) {
       MODEL_IDS,
       TAVILY_KEYS,
       TITLE,
-      ttsEnabled
+      ttsEnabled,
+      IS_CF_MODE
     );
     return new Response(htmlContent, {
       headers: {
@@ -980,6 +981,46 @@ ${truncatedAnswer}
   apiKey = apiKey.replace('Bearer ', '').trim();
   let urlSearch = url.searchParams.toString();
 
+  // 2.5 Cloudflare Workers AI 拦截: 若模型走 env.AI 绑定, 则直接本地推理, 不走外部 API
+  // 此分支必须置于外部 API Key 校验之前: CF 绑定模型无需 OpenAI API Key,
+  // 避免用户在未填写 Key 时被 401 拦截.
+  if (
+    CF_AI &&
+    apiMethod === 'POST' &&
+    (apiPath === '/v1/chat/completions' || apiPath === '/chat/completions')
+  ) {
+    try {
+      const cloned = request.clone();
+      const bodyJson = await cloned.json().catch(() => null);
+      if (bodyJson && isCfAiModel(bodyJson.model)) {
+        // 如果设置了 SECRET_PASSWORD / DEMO_PASSWORD, 仍然需要鉴权防刷;
+        // 否则空 Key 也允许直接调用 Workers AI 绑定.
+        if (SECRET_PASSWORD || DEMO_PASSWORD) {
+          if (
+            apiKey &&
+            apiKey !== SECRET_PASSWORD &&
+            !(DEMO_PASSWORD && apiKey === DEMO_PASSWORD)
+          ) {
+            // 非空但不匹配任何共享密码, 拒绝
+            return createErrorResponse('Wrong password.', 401);
+          }
+          // 命中 demo 密码时计数 (此处不消耗外部 Key, 轻量计数)
+          if (DEMO_PASSWORD && apiKey === DEMO_PASSWORD) {
+            const r = await checkAndUpdateDemoCounter(0.1);
+            if (!r.allowed) return createErrorResponse(r.message, 429);
+          }
+        }
+        const resolvedModel = resolveCfAiModelId(bodyJson.model);
+        const displayModel = bodyJson.model;
+        const aiBody = { ...bodyJson, model: resolvedModel };
+        return await handleCfAiChatCompletion(CF_AI, aiBody, displayModel);
+      }
+    } catch (e) {
+      console.error('CF AI intercept parse error:', e);
+      // 解析失败则按原流程透传, 不影响其它模型
+    }
+  }
+
   const originalApiKey = apiKey;
   const keyValidation = await validateAndProcessApiKey(apiKey);
   if (!keyValidation.valid) {
@@ -993,30 +1034,6 @@ ${truncatedAnswer}
     urlSearch = urlSearch.replace(`key=${SECRET_PASSWORD}`, `key=${apiKey}`);
   } else if (originalApiKey === DEMO_PASSWORD) {
     urlSearch = urlSearch.replace(`key=${DEMO_PASSWORD}`, `key=${apiKey}`);
-  }
-
-  // 2.5 Cloudflare Workers AI 拦截: 若模型走 env.AI 绑定, 则直接本地推理, 不走外部 API
-  if (
-    CF_AI &&
-    apiMethod === 'POST' &&
-    (apiPath === '/v1/chat/completions' || apiPath === '/chat/completions')
-  ) {
-    try {
-      // 克隆一份请求 body 用于解析 model, 不影响后续的透传
-      const cloned = request.clone();
-      const bodyJson = await cloned.json().catch(() => null);
-      if (bodyJson && isCfAiModel(bodyJson.model)) {
-        // 把别名解析为 Cloudflare Workers AI 的真实模型 ID
-        const resolvedModel = resolveCfAiModelId(bodyJson.model);
-        // 保留前端显示用的原始名称, 便于回传到 OpenAI 格式响应中
-        const displayModel = bodyJson.model;
-        const aiBody = { ...bodyJson, model: resolvedModel };
-        return await handleCfAiChatCompletion(CF_AI, aiBody, displayModel);
-      }
-    } catch (e) {
-      console.error('CF AI intercept parse error:', e);
-      // 解析失败则按原流程透传, 不影响其它模型
-    }
   }
 
   // 3. 构建请求
@@ -1882,7 +1899,13 @@ function getManifestContent(title) {
   return str.trim();
 }
 
-function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
+function getHtmlContent(
+  modelIds,
+  tavilyKeys,
+  title,
+  ttsEnabled = false,
+  isCfMode = false
+) {
   let htmlContent = `<!doctype html>
 <html lang="zh-Hans">
   <head>
@@ -4810,6 +4833,9 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
         data() {
           return {
             apiKey: '',
+            // 是否处于 Cloudflare Workers AI 绑定模式 (由后端根据 API_BASE=CLOUDFLARE 注入)
+            // 开启后: 不弹窗要求输入 API Key, 也不用 apiKey 空值禁用输入框
+            isCfMode: false,
             messageInput: '',
             isLoading: false,
             isShowSettingsModal: false,
@@ -4906,7 +4932,7 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
           inputPlaceholder() {
             var session = this.currentSession || {};
             var suffix = this.getRolePrompt() ? ' (role ✓)' : '';
-            if (!this.apiKey) {
+            if (!this.apiKey && !this.isCfMode) {
               return '请先在左上角设置 API Key';
             } else if (this.isLoadingRemoteSessions) {
               return '正在加载远程数据...';
@@ -4929,7 +4955,7 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
           canInput() {
             var session = this.currentSession;
             return (
-              this.apiKey &&
+              (this.apiKey || this.isCfMode) &&
               !this.isLoadingRemoteSessions &&
               !this.isLoading &&
               !this.isStreaming &&
@@ -5875,8 +5901,8 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
             this.autoFoldRolePrompt();
             this.loadDraftFromCurrentSession(); // 加载当前会话的草稿
 
-            // 首次向用户询问 API Key
-            if (!this.apiKey && this.isTotallyBlank) {
+            // 首次向用户询问 API Key (CF 绑定模式下不强制要求)
+            if (!this.apiKey && !this.isCfMode && this.isTotallyBlank) {
               this.askApiKeyIfNeeded();
             }
           },
@@ -7074,7 +7100,7 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
               (!this.messageInput.trim() &&
                 this.uploadedImages.length === 0 &&
                 this.uploadedPlaintexts.length === 0) ||
-              !this.apiKey
+              (!this.apiKey && !this.isCfMode)
             )
               return;
             if (this.isLoading || this.isStreaming || this.isUploadingImage)
@@ -7933,6 +7959,10 @@ function getHtmlContent(modelIds, tavilyKeys, title, ttsEnabled = false) {
       'ttsSupported: false',
       'ttsSupported: true'
     );
+  }
+  // 注入 Cloudflare Workers AI 模式标记 (为 true 时前端不强制要求用户填写 API Key)
+  if (isCfMode) {
+    htmlContent = htmlContent.replace('isCfMode: false', 'isCfMode: true');
   }
   // 控制"联网搜索"复选框的显隐
   if (!tavilyKeys) {

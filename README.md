@@ -137,7 +137,10 @@ API_BASE = CLOUDFLARE
    CF_AI_MODELS = @cf/meta/llama-3.1-8b-instruct,@cf/qwen/qwen1.5-14b-chat-awq
    ```
 
-4. **鉴权说明**：Workers AI 模型**无需外部 API Key**，但仍需通过 `SECRET_PASSWORD` / `DEMO_PASSWORD` 鉴权（防止被刷）。如果你没设置任何密码，用户在前端输入任意长度 ≥ 10 的字符串即可通过校验。
+4. **鉴权说明**：Workers AI 模型**无需外部 API Key**。
+   - 当 `API_BASE=CLOUDFLARE` 时，**前端不会强制要求用户填写 OpenAI API Key**（不弹窗、不禁用输入框），可直接开聊。
+   - 若同时设置了 `SECRET_PASSWORD` 或 `DEMO_PASSWORD`，则前端需要用户填入对应密码才能通过后端鉴权；否则留空即可。
+   - 即使进入了 CF 模式，`MODEL_IDS` 里混入的**非 `@cf/`** 外部模型仍会走原来的 API Key 流程。
 
 ### 默认别名 ↔ CF 真实模型映射表
 

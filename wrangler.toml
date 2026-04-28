@@ -2,7 +2,14 @@ name = "openai-webui-lite"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
+# Cloudflare Workers AI 绑定（免费额度：每天 10000 Neurons）
+# 启用后可直接使用 @cf/... 系列模型，无需任何 API Key
+# 参考模型列表：https://developers.cloudflare.com/workers-ai/models/
+[ai]
+binding = "AI"
+
 [env.production.vars]
 # 在 Cloudflare Dashboard 中配置敏感信息
 # API_KEYS = "key1,key2,key3"
 # API_BASE = "https://generativelanguage.googleapis.com"
+# CF_AI_MODELS = "@cf/meta/llama-3.1-8b-instruct,@cf/qwen/qwen1.5-14b-chat-awq"
